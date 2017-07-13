@@ -29,6 +29,7 @@
 
 #include <iostream>
 #include <mutex>
+#include <thread>
 
 namespace cppmicroservices {
 
@@ -106,10 +107,6 @@ public:
 
   InterfaceMapConstPtr GetService(const Bundle& caller, const ServiceRegistrationBase& /*sReg*/)
   {
-    // This code causes infinite recursion into this function. It can be used as a test case
-    // for GitHub Issue #213
-    // (void)caller.GetBundleContext().GetService(sReg.GetReference())
-    
     std::unique_lock<std::mutex> lock(fcbindLock);
     std::shared_ptr<TestProduct> product = std::make_shared<TestProduct>(caller);
     fcbind.insert(std::make_pair(caller.GetBundleId(), product));
@@ -159,15 +156,15 @@ public:
 class TestBundleHServiceFactoryInterfaceNotFound : public ServiceFactory
 {
 public:
-    InterfaceMapConstPtr GetService(const Bundle& /*caller*/, const ServiceRegistrationBase& /*sReg*/)
-    {
-      std::shared_ptr<FakeTestProduct> product = std::make_shared<FakeTestProduct>();
-      return MakeInterfaceMap<TestBundleH3>(product);
-    }
+  InterfaceMapConstPtr GetService(const Bundle& /*caller*/, const ServiceRegistrationBase& /*sReg*/)
+  {
+    std::shared_ptr<FakeTestProduct> product = std::make_shared<FakeTestProduct>();
+    return MakeInterfaceMap<TestBundleH3>(product);
+  }
 
-    void UngetService(const Bundle& /*caller*/, const ServiceRegistrationBase& /*sReg*/, const InterfaceMapConstPtr& /*service*/)
-    {
-    }
+  void UngetService(const Bundle& /*caller*/, const ServiceRegistrationBase& /*sReg*/, const InterfaceMapConstPtr& /*service*/)
+  {
+  }
 
 };
 
@@ -182,6 +179,50 @@ public:
   }
 
   void UngetService(const Bundle& /* caller */, const ServiceRegistrationBase& /*sReg*/, const InterfaceMapConstPtr& /* service */)
+  {
+  }
+
+};
+
+// Simulate an error condition whereby the service factory recursively tries to get the same service for the same bundle
+class TestBundleHServiceFactoryRecursion : public ServiceFactory
+{
+public:
+
+  InterfaceMapConstPtr GetService(const Bundle& caller, const ServiceRegistrationBase& sReg)
+  {
+    static bool validRecursion = false;
+
+    // If not called from the framework, we call GetService again, but using a
+    // different bundle context. This is required to work.
+    if (caller.GetBundleId() > 0)
+    {
+      auto bundles = caller.GetBundleContext().GetBundles();
+      for (auto b : bundles)
+      {
+        // pick the system bundle
+        if (b.GetBundleId() == 0)
+        {
+          validRecursion = true;
+          return b.GetBundleContext().GetService(ServiceReferenceU(sReg.GetReference()));
+        }
+      }
+      return nullptr;
+    }
+
+    if (validRecursion)
+    {
+      validRecursion = false;
+      return MakeInterfaceMap<TestBundleH>(std::make_shared<TestBundleH>());
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // This code causes infinite recursion into this function.
+    return caller.GetBundleContext().GetService(ServiceReferenceU(sReg.GetReference()));
+  }
+
+  void UngetService(const Bundle& /*caller*/, const ServiceRegistrationBase& /*sReg*/, const InterfaceMapConstPtr& /*service*/)
   {
   }
 
@@ -213,18 +254,20 @@ public:
   {
     factoryObj = std::make_shared<TestBundleHServiceFactory>();
     factoryService = context.RegisterService<TestBundleH>(ToFactory(factoryObj));
-    
+
     factoryObjReturningNullPtr = std::make_shared<TestBundleHServiceFactoryReturnsNullPtr>();
     factoryServiceReturningNullPtr = context.RegisterService<TestBundleH>(ToFactory(factoryObjReturningNullPtr), ServiceProperties{ { std::string("returns_nullptr"), Any(true) } });
-    
+
     factoryObjReturningWrongInterface = std::make_shared<TestBundleHServiceFactoryInterfaceNotFound>();
     factoryServiceReturningWrongInterface = context.RegisterService<TestBundleH>(ToFactory(factoryObjReturningWrongInterface), ServiceProperties{ { std::string("returns_wrong_interface"), Any(true) } });
 
     factoryObjThrowFromGetService = std::make_shared<TestBundleHServiceFactoryGetServiceThrow>();
     factoryServiceThrowFromGetService = context.RegisterService<TestBundleH>(ToFactory(factoryObjThrowFromGetService), ServiceProperties{ { std::string("getservice_exception"), Any(true) } });
-    
+
     factoryObjThrowFromUngetService = std::make_shared<TestBundleHServiceFactoryUngetServiceThrow>();
     factoryServiceThrowFromUngetService = context.RegisterService<TestBundleH>(ToFactory(factoryObjThrowFromUngetService), ServiceProperties{ { std::string("ungetservice_exception"), Any(true) } });
+
+    context.RegisterService<TestBundleH>(std::shared_ptr<ServiceFactory>(new TestBundleHServiceFactoryRecursion), ServiceProperties{ { std::string("getservice_recursion"), Any(true) } });
 
     prototypeFactoryObj = std::make_shared<TestBundleHPrototypeServiceFactory>();
     prototypeFactoryService = context.RegisterService<TestBundleH,TestBundleH2>(ToFactory(prototypeFactoryObj));
